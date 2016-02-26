@@ -1,6 +1,5 @@
 use libc::{pid_t, c_int};
-use errno::Errno;
-use {Error, Result};
+use {Errno, Result};
 
 use sys::signal;
 
@@ -12,11 +11,32 @@ mod ffi {
     }
 }
 
+#[cfg(not(any(target_os = "linux",
+              target_os = "android")))]
 bitflags!(
     flags WaitPidFlag: c_int {
-        const WNOHANG = 0x00000001,
+        const WNOHANG     = 0x00000001,
     }
 );
+
+#[cfg(any(target_os = "linux",
+          target_os = "android"))]
+bitflags!(
+    flags WaitPidFlag: c_int {
+        const WNOHANG     = 0x00000001,
+        const WUNTRACED   = 0x00000002,
+        const WEXITED     = 0x00000004,
+        const WCONTINUED  = 0x00000008,
+        const WNOWAIT     = 0x01000000, // Don't reap, just poll status.
+        const __WNOTHREAD = 0x20000000, // Don't wait on children of other threads in this group
+        const __WALL      = 0x40000000, // Wait on all children, regardless of type
+        // const __WCLONE    = 0x80000000,
+    }
+);
+
+#[cfg(any(target_os = "linux",
+          target_os = "android"))]
+const WSTOPPED: WaitPidFlag = WUNTRACED;
 
 #[derive(Eq, PartialEq, Clone, Copy, Debug)]
 pub enum WaitStatus {
@@ -112,7 +132,8 @@ mod status {
 
 #[cfg(any(target_os = "freebsd",
           target_os = "openbsd",
-          target_os = "dragonfly"))]
+          target_os = "dragonfly",
+          target_os = "netbsd"))]
 mod status {
     use sys::signal;
 
@@ -181,13 +202,10 @@ pub fn waitpid(pid: pid_t, options: Option<WaitPidFlag>) -> Result<WaitStatus> {
 
     let res = unsafe { ffi::waitpid(pid as pid_t, &mut status as *mut c_int, option_bits) };
 
-    if res < 0 {
-        Err(Error::Sys(Errno::last()))
-    } else if res == 0 {
-        Ok(StillAlive)
-    } else {
-        Ok(decode(res, status))
-    }
+    Ok(match try!(Errno::result(res)) {
+        0 => StillAlive,
+        res => decode(res, status),
+    })
 }
 
 pub fn wait() -> Result<WaitStatus> {

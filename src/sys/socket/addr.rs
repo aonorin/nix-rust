@@ -1,11 +1,12 @@
-use {Result, Error, NixPath};
 use super::{consts, sa_family_t};
-use errno::Errno;
+use {Errno, Error, Result, NixPath};
 use libc;
-use std::{fmt, hash, mem, net};
-use std::ffi::{CStr, OsStr};
+use std::{fmt, hash, mem, net, ptr};
+use std::ffi::OsStr;
 use std::path::Path;
 use std::os::unix::ffi::OsStrExt;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use ::sys::socket::addr::netlink::NetlinkAddr;
 
 // TODO: uncomment out IpAddr functions: rust-lang/rfcs#988
 
@@ -21,6 +22,10 @@ pub enum AddressFamily {
     Unix = consts::AF_UNIX,
     Inet = consts::AF_INET,
     Inet6 = consts::AF_INET6,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    Netlink = consts::AF_NETLINK,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    Packet = consts::AF_PACKET,
 }
 
 #[derive(Copy)]
@@ -278,20 +283,27 @@ impl fmt::Display for Ipv4Addr {
 #[derive(Clone, Copy)]
 pub struct Ipv6Addr(pub libc::in6_addr);
 
+// Note that IPv6 addresses are stored in big endian order on all architectures.
+// See https://tools.ietf.org/html/rfc1700 or consult your favorite search
+// engine.
+
+macro_rules! to_u8_array {
+    ($($num:ident),*) => {
+        [ $(($num>>8) as u8, ($num&0xff) as u8,)* ]
+    }
+}
+
+macro_rules! to_u16_array {
+    ($slf:ident, $($first:expr, $second:expr),*) => {
+        [$( (($slf.0.s6_addr[$first] as u16) << 8) + $slf.0.s6_addr[$second] as u16,)*]
+    }
+}
+
 impl Ipv6Addr {
     pub fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Ipv6Addr {
-        Ipv6Addr(libc::in6_addr {
-            s6_addr: [
-                a.to_be(),
-                b.to_be(),
-                c.to_be(),
-                d.to_be(),
-                e.to_be(),
-                f.to_be(),
-                g.to_be(),
-                h.to_be(),
-            ]
-        })
+        let mut in6_addr_var: libc::in6_addr = unsafe{mem::uninitialized()};
+        in6_addr_var.s6_addr = to_u8_array!(a,b,c,d,e,f,g,h);
+        Ipv6Addr(in6_addr_var)
     }
 
     pub fn from_std(std: &net::Ipv6Addr) -> Ipv6Addr {
@@ -301,14 +313,7 @@ impl Ipv6Addr {
 
     /// Return the eight 16-bit segments that make up this address
     pub fn segments(&self) -> [u16; 8] {
-        [u16::from_be(self.0.s6_addr[0]),
-         u16::from_be(self.0.s6_addr[1]),
-         u16::from_be(self.0.s6_addr[2]),
-         u16::from_be(self.0.s6_addr[3]),
-         u16::from_be(self.0.s6_addr[4]),
-         u16::from_be(self.0.s6_addr[5]),
-         u16::from_be(self.0.s6_addr[6]),
-         u16::from_be(self.0.s6_addr[7])]
+        to_u16_array!(self, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15)
     }
 
     pub fn to_std(&self) -> net::Ipv6Addr {
@@ -329,13 +334,16 @@ impl fmt::Display for Ipv6Addr {
  *
  */
 
+/// A wrapper around sockaddr_un. We track the length of sun_path,
+/// because it may not be null-terminated (unconnected and abstract
+/// sockets). Note that the actual sockaddr length is greater by
+/// size_of::<sa_family_t>().
 #[derive(Copy)]
-pub struct UnixAddr(pub libc::sockaddr_un);
+pub struct UnixAddr(pub libc::sockaddr_un, pub usize);
 
 impl UnixAddr {
+    /// Create a new sockaddr_un representing a filesystem path.
     pub fn new<P: ?Sized + NixPath>(path: &P) -> Result<UnixAddr> {
-        use libc::strcpy;
-
         try!(path.with_nix_path(|cstr| {
             unsafe {
                 let mut ret = libc::sockaddr_un {
@@ -343,31 +351,65 @@ impl UnixAddr {
                     .. mem::zeroed()
                 };
 
-                // Must be smaller to account for the null byte
-                if path.len() >= ret.sun_path.len() {
+                let bytes = cstr.to_bytes_with_nul();
+
+                if bytes.len() > ret.sun_path.len() {
                     return Err(Error::Sys(Errno::ENAMETOOLONG));
                 }
 
-                strcpy(ret.sun_path.as_mut_ptr(), cstr.as_ptr());
+                ptr::copy_nonoverlapping(bytes.as_ptr(),
+                                         ret.sun_path.as_mut_ptr() as *mut u8,
+                                         bytes.len());
 
-                Ok(UnixAddr(ret))
+                Ok(UnixAddr(ret, bytes.len()))
             }
         }))
     }
 
-    pub fn path(&self) -> &Path {
+    /// Create a new sockaddr_un representing an address in the
+    /// "abstract namespace". This is a Linux-specific extension,
+    /// primarily used to allow chrooted processes to communicate with
+    /// specific daemons.
+    pub fn new_abstract(path: &[u8]) -> Result<UnixAddr> {
         unsafe {
-            let bytes = CStr::from_ptr(self.0.sun_path.as_ptr()).to_bytes();
-            Path::new(<OsStr as OsStrExt>::from_bytes(bytes))
+            let mut ret = libc::sockaddr_un {
+                sun_family: AddressFamily::Unix as sa_family_t,
+                .. mem::zeroed()
+            };
+
+            if path.len() > ret.sun_path.len() {
+                return Err(Error::Sys(Errno::ENAMETOOLONG));
+            }
+
+            // Abstract addresses are represented by sun_path[0] ==
+            // b'\0', so copy starting one byte in.
+            ptr::copy_nonoverlapping(path.as_ptr(),
+                                     ret.sun_path.as_mut_ptr().offset(1) as *mut u8,
+                                     path.len());
+
+            Ok(UnixAddr(ret, path.len()))
+        }
+    }
+
+    fn sun_path(&self) -> &[u8] {
+        unsafe { mem::transmute(&self.0.sun_path[..self.1]) }
+    }
+
+    /// If this address represents a filesystem path, return that path.
+    pub fn path(&self) -> Option<&Path> {
+        if self.1 == 0 || self.0.sun_path[0] == 0 {
+            // unbound or abstract
+            None
+        } else {
+            let p = self.sun_path();
+            Some(Path::new(<OsStr as OsStrExt>::from_bytes(&p[..p.len()-1])))
         }
     }
 }
 
 impl PartialEq for UnixAddr {
     fn eq(&self, other: &UnixAddr) -> bool {
-        unsafe {
-            0 == libc::strcmp(self.0.sun_path.as_ptr(), other.0.sun_path.as_ptr())
-        }
+        self.sun_path() == other.sun_path()
     }
 }
 
@@ -376,7 +418,7 @@ impl Eq for UnixAddr {
 
 impl hash::Hash for UnixAddr {
     fn hash<H: hash::Hasher>(&self, s: &mut H) {
-        ( self.0.sun_family, self.path() ).hash(s)
+        ( self.0.sun_family, self.sun_path() ).hash(s)
     }
 }
 
@@ -388,7 +430,14 @@ impl Clone for UnixAddr {
 
 impl fmt::Display for UnixAddr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.path().display().fmt(f)
+        if self.1 == 0 {
+            f.write_str("<unbound UNIX socket>")
+        } else if let Some(path) = self.path() {
+            path.display().fmt(f)
+        } else {
+            let display = String::from_utf8_lossy(&self.sun_path()[1..]);
+            write!(f, "@{}", display)
+        }
     }
 }
 
@@ -402,7 +451,9 @@ impl fmt::Display for UnixAddr {
 #[derive(Copy)]
 pub enum SockAddr {
     Inet(InetAddr),
-    Unix(UnixAddr)
+    Unix(UnixAddr),
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    Netlink(NetlinkAddr)
 }
 
 impl SockAddr {
@@ -414,11 +465,18 @@ impl SockAddr {
         Ok(SockAddr::Unix(try!(UnixAddr::new(path))))
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn new_netlink(pid: u32, groups: u32) -> SockAddr {
+        SockAddr::Netlink(NetlinkAddr::new(pid, groups))
+    }
+
     pub fn family(&self) -> AddressFamily {
         match *self {
             SockAddr::Inet(InetAddr::V4(..)) => AddressFamily::Inet,
             SockAddr::Inet(InetAddr::V6(..)) => AddressFamily::Inet6,
             SockAddr::Unix(..) => AddressFamily::Unix,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            SockAddr::Netlink(..) => AddressFamily::Netlink,
         }
     }
 
@@ -430,7 +488,9 @@ impl SockAddr {
         match *self {
             SockAddr::Inet(InetAddr::V4(ref addr)) => (mem::transmute(addr), mem::size_of::<libc::sockaddr_in>() as libc::socklen_t),
             SockAddr::Inet(InetAddr::V6(ref addr)) => (mem::transmute(addr), mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t),
-            SockAddr::Unix(UnixAddr(ref addr)) => (mem::transmute(addr), mem::size_of::<libc::sockaddr_un>() as libc::socklen_t),
+            SockAddr::Unix(UnixAddr(ref addr, len)) => (mem::transmute(addr), (len + mem::size_of::<libc::sa_family_t>()) as libc::socklen_t),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            SockAddr::Netlink(NetlinkAddr(ref sa)) => (mem::transmute(sa), mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t),
         }
     }
 }
@@ -442,6 +502,10 @@ impl PartialEq for SockAddr {
                 a == b
             }
             (SockAddr::Unix(ref a), SockAddr::Unix(ref b)) => {
+                a == b
+            }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            (SockAddr::Netlink(ref a), SockAddr::Netlink(ref b)) => {
                 a == b
             }
             _ => false,
@@ -457,6 +521,8 @@ impl hash::Hash for SockAddr {
         match *self {
             SockAddr::Inet(ref a) => a.hash(s),
             SockAddr::Unix(ref a) => a.hash(s),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            SockAddr::Netlink(ref a) => a.hash(s),
         }
     }
 }
@@ -472,6 +538,63 @@ impl fmt::Display for SockAddr {
         match *self {
             SockAddr::Inet(ref inet) => inet.fmt(f),
             SockAddr::Unix(ref unix) => unix.fmt(f),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            SockAddr::Netlink(ref nl) => nl.fmt(f),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod netlink {
+    use ::sys::socket::addr::{AddressFamily};
+    use libc::{sa_family_t, sockaddr_nl};
+    use std::{fmt, mem};
+    use std::hash::{Hash, Hasher};
+
+    #[derive(Copy, Clone)]
+    pub struct NetlinkAddr(pub sockaddr_nl);
+
+    // , PartialEq, Eq, Debug, Hash
+    impl PartialEq for NetlinkAddr {
+        fn eq(&self, other: &Self) -> bool {
+            let (inner, other) = (self.0, other.0);
+            (inner.nl_family, inner.nl_pid, inner.nl_groups) ==
+            (other.nl_family, other.nl_pid, other.nl_groups)
+        }
+    }
+
+    impl Eq for NetlinkAddr {}
+
+    impl Hash for NetlinkAddr {
+        fn hash<H: Hasher>(&self, s: &mut H) {
+            let inner = self.0;
+            (inner.nl_family, inner.nl_pid, inner.nl_groups).hash(s);
+        }
+    }
+
+
+    impl NetlinkAddr {
+        pub fn new(pid: u32, groups: u32) -> NetlinkAddr {
+            let mut addr: sockaddr_nl = unsafe { mem::zeroed() };
+            addr.nl_family = AddressFamily::Netlink as sa_family_t;
+            addr.nl_pid = pid;
+            addr.nl_groups = groups;
+
+            NetlinkAddr(addr)
+        }
+
+        pub fn pid(&self) -> u32 {
+            self.0.nl_pid
+        }
+
+        pub fn groups(&self) -> u32 {
+            self.0.nl_groups
+        }
+    }
+
+    impl fmt::Display for NetlinkAddr {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "pid: {} groups: {}", self.pid(), self.groups())
         }
     }
 }

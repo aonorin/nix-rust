@@ -1,15 +1,24 @@
-use std::fs;
-use std::str;
+use std::fs::File;
+use std::os::unix::fs::symlink;
+use std::os::unix::prelude::AsRawFd;
 
-use libc::consts::os::posix88;
+use libc::{S_IFMT, S_IFLNK};
 
 use nix::sys::stat::{stat, fstat, lstat};
 
-use nix::fcntl::open;
-use nix::unistd::{close, unlink};
-use nix::fcntl::{O_CREAT, O_RDONLY};
-use nix::sys::stat::{FileStat, S_IWUSR, S_IRUSR};
+use nix::sys::stat::FileStat;
 use nix::Result;
+use tempdir::TempDir;
+
+#[allow(unused_comparisons)]
+// uid and gid are signed on Windows, but not on other platforms. This function
+// allows warning free compiles on all platforms, and can be removed when
+// expression-level #[allow] is available.
+fn valid_uid_gid(stat: FileStat) -> bool {
+    // uid could be 0 for the `root` user. This quite possible when
+    // the tests are being run on a rooted Android device.
+    stat.st_uid >= 0 && stat.st_gid >= 0
+}
 
 fn assert_stat_results(stat_result: Result<FileStat>) {
     match stat_result {
@@ -18,10 +27,7 @@ fn assert_stat_results(stat_result: Result<FileStat>) {
             assert!(stats.st_ino > 0);      // inode is positive integer, exact number machine dependent
             assert!(stats.st_mode > 0);     // must be positive integer
             assert!(stats.st_nlink == 1);   // there links created, must be 1
-            // uid could be 0 for the `root` user. This quite possible when
-            // the tests are being run on a rooted Android device.
-            assert!(stats.st_uid >= 0);      // must be positive integer
-            assert!(stats.st_gid >= 0);      // must be positive integer
+            assert!(valid_uid_gid(stats));  // must be positive integers
             assert!(stats.st_size == 0);    // size is 0 because we did not write anything to the file
             assert!(stats.st_blksize > 0);  // must be positive integer, exact number machine dependent
             assert!(stats.st_blocks <= 16);  // Up to 16 blocks can be allocated for a blank file
@@ -40,13 +46,9 @@ fn assert_lstat_results(stat_result: Result<FileStat>) {
             // st_mode is c_uint (u32 on Android) while S_IFMT is mode_t
             // (u16 on Android), and that will be a compile error.
             // On other platforms they are the same (either both are u16 or u32).
-            assert!((stats.st_mode as usize) & (posix88::S_IFMT as usize)
-                    == posix88::S_IFLNK as usize); // should be a link
+            assert!((stats.st_mode as usize) & (S_IFMT as usize) == S_IFLNK as usize); // should be a link
             assert!(stats.st_nlink == 1);   // there links created, must be 1
-            // uid could be 0 for the `root` user. This quite possible when
-            // the tests are being run on a rooted Android device.
-            assert!(stats.st_uid >= 0);      // must be positive integer
-            assert!(stats.st_gid >= 0);      // must be positive integer
+            assert!(valid_uid_gid(stats));  // must be positive integers
             assert!(stats.st_size > 0);    // size is > 0 because it points to another file
             assert!(stats.st_blksize > 0);  // must be positive integer, exact number machine dependent
 
@@ -61,40 +63,35 @@ fn assert_lstat_results(stat_result: Result<FileStat>) {
 
 #[test]
 fn test_stat_and_fstat() {
-    let filename = b"target/foo.txt".as_ref();
-    let fd = open(filename, O_CREAT, S_IWUSR).unwrap();  // create empty file
+    let tempdir = TempDir::new("nix-test_stat_and_fstat").unwrap();
+    let filename = tempdir.path().join("foo.txt");
+    let file = File::create(&filename).unwrap();
 
-    let stat_result = stat(filename);
+    let stat_result = stat(&filename);
     assert_stat_results(stat_result);
 
-    let fstat_result = fstat(fd);
+    let fstat_result = fstat(file.as_raw_fd());
     assert_stat_results(fstat_result);
-
-    close(fd).unwrap();
-    unlink(filename).unwrap();
 }
 
 #[test]
 fn test_stat_fstat_lstat() {
-    let filename = b"target/bar.txt".as_ref();
-    let linkname = b"target/barlink".as_ref();
+    let tempdir = TempDir::new("nix-test_stat_fstat_lstat").unwrap();
+    let filename = tempdir.path().join("bar.txt");
+    let linkname = tempdir.path().join("barlink");
 
-    open(filename, O_CREAT, S_IWUSR | S_IRUSR).unwrap();  // create empty file
-    fs::soft_link("bar.txt", str::from_utf8(linkname).unwrap()).unwrap();
-    let fd = open(linkname, O_RDONLY, S_IRUSR).unwrap();
+    File::create(&filename).unwrap();
+    symlink("bar.txt", &linkname).unwrap();
+    let link = File::open(&linkname).unwrap();
 
     // should be the same result as calling stat,
     // since it's a regular file
-    let stat_result = lstat(filename);
+    let stat_result = lstat(&filename);
     assert_stat_results(stat_result);
 
-    let lstat_result = lstat(linkname);
+    let lstat_result = lstat(&linkname);
     assert_lstat_results(lstat_result);
 
-    let fstat_result = fstat(fd);
+    let fstat_result = fstat(link.as_raw_fd());
     assert_stat_results(fstat_result);
-
-    close(fd).unwrap();
-    unlink(linkname).unwrap();
-    unlink(filename).unwrap();
 }

@@ -1,8 +1,4 @@
-use libc::{self, c_int};
 pub use self::os::*;
-
-pub const IPV6_ADD_MEMBERSHIP: c_int = libc::IPV6_ADD_MEMBERSHIP;
-pub const IPV6_DROP_MEMBERSHIP: c_int = libc::IPV6_DROP_MEMBERSHIP;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod os {
@@ -12,6 +8,8 @@ mod os {
     pub const AF_LOCAL: c_int = AF_UNIX;
     pub const AF_INET: c_int  = 2;
     pub const AF_INET6: c_int = 10;
+    pub const AF_NETLINK: c_int = 16;
+    pub const AF_PACKET: c_int = 17;
 
     pub const SOCK_STREAM: c_int = 1;
     pub const SOCK_DGRAM: c_int = 2;
@@ -24,6 +22,7 @@ mod os {
     pub const SOL_TCP: c_int    = 6;
     pub const SOL_UDP: c_int    = 17;
     pub const SOL_IPV6: c_int   = 41;
+    pub const SOL_NETLINK: c_int = 270;
     pub const IPPROTO_IP: c_int = SOL_IP;
     pub const IPPROTO_IPV6: c_int = SOL_IPV6;
     pub const IPPROTO_TCP: c_int = SOL_TCP;
@@ -77,6 +76,9 @@ mod os {
     pub const IP_ADD_MEMBERSHIP: c_int = 35;
     pub const IP_DROP_MEMBERSHIP: c_int = 36;
 
+    pub const IPV6_ADD_MEMBERSHIP: c_int = libc::IPV6_ADD_MEMBERSHIP;
+    pub const IPV6_DROP_MEMBERSHIP: c_int = libc::IPV6_DROP_MEMBERSHIP;
+
     pub type InAddrT = u32;
 
     // Declarations of special addresses
@@ -84,15 +86,18 @@ mod os {
     pub const INADDR_NONE: InAddrT = 0xffffffff;
     pub const INADDR_BROADCAST: InAddrT = 0xffffffff;
 
-    pub type SockMessageFlags = c_int;
     // Flags for send/recv and their relatives
-    pub const MSG_OOB: SockMessageFlags = 0x1;
-    pub const MSG_PEEK: SockMessageFlags = 0x2;
-    pub const MSG_CTRUNC: SockMessageFlags = 0x08;
-    pub const MSG_TRUNC: SockMessageFlags = 0x20;
-    pub const MSG_DONTWAIT: SockMessageFlags = 0x40;
-    pub const MSG_EOR: SockMessageFlags = 0x80;
-    pub const MSG_ERRQUEUE: SockMessageFlags = 0x2000;
+    bitflags!{
+        flags MsgFlags : libc::c_int {
+            const MSG_OOB      = 0x0001,
+            const MSG_PEEK     = 0x0002,
+            const MSG_CTRUNC   = 0x0008,
+            const MSG_TRUNC    = 0x0020,
+            const MSG_DONTWAIT = 0x0040,
+            const MSG_EOR      = 0x0080,
+            const MSG_ERRQUEUE = 0x2000,
+        }
+    }
 
     // shutdown flags
     pub const SHUT_RD: c_int   = 0;
@@ -104,18 +109,20 @@ mod os {
 }
 
 // Not all of these constants exist on freebsd
-#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "ios", target_os = "openbsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
 mod os {
     #[cfg(any(target_os = "macos",
               target_os = "ios",
               target_os = "freebsd"))]
     use libc::{self, c_int, uint8_t};
-    #[cfg(any(target_os = "openbsd"))]
-    use libc::{c_int, uint8_t};
+    #[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
+    use libc::{self, c_int, uint8_t};
 
     pub const AF_UNIX: c_int  = 1;
     pub const AF_LOCAL: c_int = AF_UNIX;
     pub const AF_INET: c_int  = 2;
+    #[cfg(target_os = "netbsd")]
+    pub const AF_INET6: c_int = 24;
     #[cfg(target_os = "openbsd")]
     pub const AF_INET6: c_int = 26;
     #[cfg(target_os = "freebsd")]
@@ -138,7 +145,10 @@ mod os {
     pub const SO_ACCEPTCONN: c_int          = 0x0002;
     pub const SO_BROADCAST: c_int           = 0x0020;
     pub const SO_DEBUG: c_int               = 0x0001;
+    #[cfg(not(target_os = "netbsd"))]
     pub const SO_DONTTRUNC: c_int           = 0x2000;
+    #[cfg(target_os = "netbsd")]
+    pub const SO_USELOOPBACK: c_int         = 0x0040;
     pub const SO_ERROR: c_int               = 0x1007;
     pub const SO_DONTROUTE: c_int           = 0x0010;
     pub const SO_KEEPALIVE: c_int           = 0x0008;
@@ -166,9 +176,14 @@ mod os {
     pub const SO_REUSEPORT: c_int           = 0x0200;
     pub const SO_REUSESHAREUID: c_int       = 0x1025;
     pub const SO_SNDBUF: c_int              = 0x1001;
+    #[cfg(not(target_os = "netbsd"))]
     pub const SO_TIMESTAMP: c_int           = 0x0400;
+    #[cfg(not(target_os = "netbsd"))]
     pub const SO_TIMESTAMP_MONOTONIC: c_int = 0x0800;
+    #[cfg(target_os = "netbsd")]
+    pub const SO_TIMESTAMP: c_int           = 0x2000;
     pub const SO_TYPE: c_int                = 0x1008;
+    #[cfg(not(target_os = "netbsd"))]
     pub const SO_WANTMORE: c_int            = 0x4000;
     pub const SO_WANTOOBFLAG: c_int         = 0x8000;
     #[allow(overflowing_literals)]
@@ -182,6 +197,8 @@ mod os {
     pub const TCP_KEEPALIVE: c_int = libc::TCP_KEEPALIVE;
     #[cfg(target_os = "freebsd")]
     pub const TCP_KEEPIDLE: c_int = libc::TCP_KEEPIDLE;
+    #[cfg(target_os = "netbsd")]
+    pub const TCP_KEEPIDLE: c_int = 3;
 
     // Socket options for the IP layer of the socket
     pub const IP_MULTICAST_IF: c_int = 9;
@@ -193,6 +210,9 @@ mod os {
     pub const IP_ADD_MEMBERSHIP: c_int = 12;
     pub const IP_DROP_MEMBERSHIP: c_int = 13;
 
+    pub const IPV6_JOIN_GROUP: c_int = libc::IPV6_JOIN_GROUP;
+    pub const IPV6_LEAVE_GROUP: c_int = libc::IPV6_LEAVE_GROUP;
+
     pub type InAddrT = u32;
 
     // Declarations of special addresses
@@ -200,14 +220,17 @@ mod os {
     pub const INADDR_NONE: InAddrT = 0xffffffff;
     pub const INADDR_BROADCAST: InAddrT = 0xffffffff;
 
-    pub type SockMessageFlags = i32;
     // Flags for send/recv and their relatives
-    pub const MSG_OOB: SockMessageFlags = 0x1;
-    pub const MSG_PEEK: SockMessageFlags = 0x2;
-    pub const MSG_EOR: SockMessageFlags = 0x8;
-    pub const MSG_TRUNC: SockMessageFlags = 0x10;
-    pub const MSG_CTRUNC: SockMessageFlags = 0x20;
-    pub const MSG_DONTWAIT: SockMessageFlags = 0x80;
+    bitflags!{
+        flags MsgFlags : libc::c_int {
+            const MSG_OOB      = 0x01,
+            const MSG_PEEK     = 0x02,
+            const MSG_EOR      = 0x08,
+            const MSG_TRUNC    = 0x10,
+            const MSG_CTRUNC   = 0x20,
+            const MSG_DONTWAIT = 0x80,
+        }
+    }
 
     // shutdown flags
     pub const SHUT_RD: c_int   = 0;
@@ -273,6 +296,8 @@ mod os {
     pub const IP_MULTICAST_LOOP: c_int = 11;
     pub const IP_ADD_MEMBERSHIP: c_int = 12;
     pub const IP_DROP_MEMBERSHIP: c_int = 13;
+    pub const IPV6_JOIN_GROUP: c_int = libc::IPV6_JOIN_GROUP;
+    pub const IPV6_LEAVE_GROUP: c_int = libc::IPV6_LEAVE_GROUP;
 
     pub type InAddrT = u32;
 
@@ -281,11 +306,14 @@ mod os {
     pub const INADDR_NONE: InAddrT = 0xffffffff;
     pub const INADDR_BROADCAST: InAddrT = 0xffffffff;
 
-    pub type SockMessageFlags = i32;
     // Flags for send/recv and their relatives
-    pub const MSG_OOB: SockMessageFlags = 0x1;
-    pub const MSG_PEEK: SockMessageFlags = 0x2;
-    pub const MSG_DONTWAIT: SockMessageFlags = 0x80;
+    bitflags!{
+        flags MsgFlags : libc::c_int {
+            const MSG_OOB      = 0x01,
+            const MSG_PEEK     = 0x02,
+            const MSG_DONTWAIT = 0x80,
+        }
+    }
 
     // shutdown flags
     pub const SHUT_RD: c_int   = 0;
@@ -296,12 +324,25 @@ mod os {
 #[cfg(test)]
 mod test {
     use super::*;
-    use nixtest::assert_const_eq;
-    use libc::c_int;
+    use nixtest::{assert_const_eq,get_int_const,GetConst};
+    use libc::{c_char};
+    use std::fmt;
+
+    impl fmt::Display for MsgFlags {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(f, "{}", self.bits())
+        }
+    }
+
+    impl GetConst for MsgFlags {
+        unsafe fn get_const(name: *const c_char) -> MsgFlags {
+            MsgFlags::from_bits_truncate(get_int_const(name))
+        }
+    }
 
     macro_rules! check_const {
         ($($konst:ident),+) => {{
-            $(assert_const_eq(stringify!($konst), $konst as c_int);)+
+            $(assert_const_eq(stringify!($konst), $konst);)+
         }};
     }
 

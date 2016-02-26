@@ -18,8 +18,9 @@ extern crate libc;
 #[cfg(test)]
 extern crate nix_test as nixtest;
 
-// Re-export some libc constants
+// Re-exports
 pub use libc::{c_int, c_void};
+pub use errno::Errno;
 
 pub mod errno;
 pub mod features;
@@ -30,6 +31,11 @@ pub mod mount;
 
 #[cfg(any(target_os = "linux"))]
 pub mod mqueue;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod poll;
+
+pub mod net;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod sched;
@@ -45,9 +51,13 @@ pub mod unistd;
 
 use libc::c_char;
 use std::{ptr, result};
-use std::ffi::CStr;
+use std::ffi::{CStr, OsStr};
 use std::path::{Path, PathBuf};
 use std::os::unix::ffi::OsStrExt;
+use std::io;
+use std::fmt;
+use std::error;
+use libc::PATH_MAX;
 
 pub type Result<T> = result::Result<T, Error>;
 
@@ -78,11 +88,80 @@ impl Error {
     }
 }
 
+impl From<errno::Errno> for Error {
+    fn from(errno: errno::Errno) -> Error { Error::from_errno(errno) }
+}
+
+impl error::Error for Error {
+    fn description(&self) -> &str {
+        match self {
+            &Error::InvalidPath => "Invalid path",
+            &Error::Sys(ref errno) => errno.desc(),
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &Error::InvalidPath => write!(f, "Invalid path"),
+            &Error::Sys(errno) => write!(f, "{:?}: {}", errno, errno.desc()),
+        }
+    }
+}
+
+impl From<Error> for io::Error {
+    fn from(err: Error) -> Self {
+        match err {
+            Error::InvalidPath => io::Error::new(io::ErrorKind::InvalidInput, err),
+            Error::Sys(errno) => io::Error::from_raw_os_error(errno as i32),
+        }
+    }
+}
+
 pub trait NixPath {
     fn len(&self) -> usize;
 
     fn with_nix_path<T, F>(&self, f: F) -> Result<T>
         where F: FnOnce(&CStr) -> T;
+}
+
+impl NixPath for str {
+    fn len(&self) -> usize {
+        NixPath::len(OsStr::new(self))
+    }
+
+    fn with_nix_path<T, F>(&self, f: F) -> Result<T>
+        where F: FnOnce(&CStr) -> T {
+            OsStr::new(self).with_nix_path(f)
+        }
+}
+
+impl NixPath for OsStr {
+    fn len(&self) -> usize {
+        self.as_bytes().len()
+    }
+
+    fn with_nix_path<T, F>(&self, f: F) -> Result<T>
+        where F: FnOnce(&CStr) -> T {
+            self.as_bytes().with_nix_path(f)
+        }
+}
+
+impl NixPath for CStr {
+    fn len(&self) -> usize {
+        self.to_bytes().len()
+    }
+
+    fn with_nix_path<T, F>(&self, f: F) -> Result<T>
+            where F: FnOnce(&CStr) -> T {
+        // Equivalence with the [u8] impl.
+        if self.len() >= PATH_MAX as usize {
+            return Err(Error::InvalidPath);
+        }
+
+        Ok(f(self))
+    }
 }
 
 impl NixPath for [u8] {
@@ -92,10 +171,9 @@ impl NixPath for [u8] {
 
     fn with_nix_path<T, F>(&self, f: F) -> Result<T>
             where F: FnOnce(&CStr) -> T {
-        // TODO: Extract this size as a const
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; PATH_MAX as usize];
 
-        if self.len() >= 4096 {
+        if self.len() >= PATH_MAX as usize {
             return Err(Error::InvalidPath);
         }
 
@@ -115,29 +193,35 @@ impl NixPath for [u8] {
 
 impl NixPath for Path {
     fn len(&self) -> usize {
-        self.as_os_str().as_bytes().len()
+        NixPath::len(self.as_os_str())
     }
 
     fn with_nix_path<T, F>(&self, f: F) -> Result<T> where F: FnOnce(&CStr) -> T {
-        self.as_os_str().as_bytes().with_nix_path(f)
+        self.as_os_str().with_nix_path(f)
     }
 }
 
 impl NixPath for PathBuf {
     fn len(&self) -> usize {
-        self.as_os_str().as_bytes().len()
+        NixPath::len(self.as_os_str())
     }
 
     fn with_nix_path<T, F>(&self, f: F) -> Result<T> where F: FnOnce(&CStr) -> T {
-        self.as_os_str().as_bytes().with_nix_path(f)
+        self.as_os_str().with_nix_path(f)
     }
 }
 
-#[inline]
-pub fn from_ffi(res: libc::c_int) -> Result<()> {
-    if res != 0 {
-        return Err(Error::Sys(errno::Errno::last()));
+/// Treats `None` as an empty string.
+impl<'a, NP: ?Sized + NixPath>  NixPath for Option<&'a NP> {
+    fn len(&self) -> usize {
+        self.map_or(0, NixPath::len)
     }
 
-    Ok(())
+    fn with_nix_path<T, F>(&self, f: F) -> Result<T> where F: FnOnce(&CStr) -> T {
+        if let Some(nix_path) = *self {
+            nix_path.with_nix_path(f)
+        } else {
+            unsafe { CStr::from_ptr("\0".as_ptr() as *const _).with_nix_path(f) }
+        }
+    }
 }

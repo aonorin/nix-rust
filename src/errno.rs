@@ -1,8 +1,9 @@
 use libc::c_int;
+use std::{fmt, io, error};
+use {Error, Result};
 
 pub use self::consts::*;
 pub use self::consts::Errno::*;
-
 
 #[cfg(any(target_os = "macos",
           target_os = "ios",
@@ -28,7 +29,7 @@ unsafe fn errno_location() -> *mut c_int {
     __dfly_error()
 }
 
-#[cfg(target_os = "openbsd")]
+#[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
 unsafe fn errno_location() -> *mut c_int {
     extern { fn __errno() -> *mut c_int; }
     __errno()
@@ -52,25 +53,67 @@ pub fn errno() -> i32 {
     }
 }
 
-macro_rules! impl_errno {
-    ($errno:ty) => {
-        impl $errno {
-            pub fn last() -> Errno {
-                super::last()
-            }
+impl Errno {
+    pub fn last() -> Self {
+        last()
+    }
 
-            pub fn desc(self) -> &'static str {
-                super::desc(self)
-            }
+    pub fn desc(self) -> &'static str {
+        desc(self)
+    }
 
-            pub fn from_i32(err: i32) -> Errno {
-                from_i32(err)
-            }
+    pub fn from_i32(err: i32) -> Errno {
+        from_i32(err)
+    }
 
-            pub unsafe fn clear() -> () {
-                super::clear()
-            }
+    pub unsafe fn clear() -> () {
+        clear()
+    }
+
+    /// Returns `Ok(value)` if it does not contain the sentinel value. This
+    /// should not be used when `-1` is not the errno sentinel value.
+    pub fn result<S: ErrnoSentinel + PartialEq<S>>(value: S) -> Result<S> {
+        if value == S::sentinel() {
+            Err(Error::Sys(Self::last()))
+        } else {
+            Ok(value)
         }
+    }
+}
+
+/// The sentinel value indicates that a function failed and more detailed
+/// information about the error can be found in `errno`
+pub trait ErrnoSentinel: Sized {
+    fn sentinel() -> Self;
+}
+
+impl ErrnoSentinel for isize {
+    fn sentinel() -> Self { -1 }
+}
+
+impl ErrnoSentinel for i32 {
+    fn sentinel() -> Self { -1 }
+}
+
+impl ErrnoSentinel for i64 {
+    fn sentinel() -> Self { -1 }
+}
+
+impl error::Error for Errno {
+    fn description(&self) -> &str {
+        self.desc()
+    }
+}
+
+impl fmt::Display for Errno {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}: {}", self, self.desc())
+    }
+}
+
+impl From<Errno> for io::Error {
+    fn from(err: Errno) -> Self {
+        io::Error::from_raw_os_error(err as i32)
     }
 }
 
@@ -280,7 +323,7 @@ fn desc(errno: Errno) -> &'static str {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         EUSERS          => "Too many users",
 
-        #[cfg(any(target_os = "linux", target_os = "android"))]
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "netbsd"))]
         EOPNOTSUPP      => "Operation not supported on transport endpoint",
 
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -352,22 +395,22 @@ fn desc(errno: Errno) -> &'static str {
         #[cfg(target_os = "freebsd")]
         ECAPMODE        => "Not permitted in capability mode",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         ENEEDAUTH       => "Need authenticator",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         EOVERFLOW       => "Value too large to be stored in data type",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "netbsd"))]
         EILSEQ          => "Illegal byte sequence",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         ENOATTR         => "Attribute not found",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "netbsd"))]
         EBADMSG         => "Bad message",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "netbsd"))]
         EPROTO          => "Protocol error",
 
         #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "ios"))]
@@ -376,46 +419,46 @@ fn desc(errno: Errno) -> &'static str {
         #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "ios"))]
         EOWNERDEAD      => "Previous owner died",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         ENOTSUP         => "Operation not supported",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         EPROCLIM        => "Too many processes",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         EUSERS          => "Too many users",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         EDQUOT          => "Disc quota exceeded",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         ESTALE          => "Stale NFS file handle",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         EREMOTE         => "Too many levels of remote in path",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         EBADRPC         => "RPC struct is bad",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         ERPCMISMATCH    => "RPC version wrong",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         EPROGUNAVAIL    => "RPC prog. not avail",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         EPROGMISMATCH   => "Program version wrong",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         EPROCUNAVAIL    => "Bad procedure for program",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         EFTYPE          => "Inappropriate file type or format",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         EAUTH           => "Authentication error",
 
-        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "dragonfly", target_os = "ios", target_os = "openbsd", target_os = "netbsd"))]
         ECANCELED       => "Operation canceled",
 
         #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -436,22 +479,22 @@ fn desc(errno: Errno) -> &'static str {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         EBADMACHO       => "Malformed Macho file",
 
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "netbsd"))]
         EMULTIHOP       => "Reserved",
 
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "netbsd"))]
         ENODATA         => "No message available on STREAM",
 
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "netbsd"))]
         ENOLINK         => "Reserved",
 
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "netbsd"))]
         ENOSR           => "No STREAM resources",
 
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "netbsd"))]
         ENOSTR          => "Not a STREAM",
 
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "netbsd"))]
         ETIME           => "STREAM ioctl timeout",
 
         #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -617,8 +660,6 @@ mod consts {
         #[cfg(not(target_os = "android"))]
         EHWPOISON       = 133,
     }
-
-    impl_errno!(Errno);
 
     pub const EWOULDBLOCK: Errno = Errno::EAGAIN;
     pub const EDEADLOCK:   Errno = Errno::EDEADLK;
@@ -880,8 +921,6 @@ mod consts {
         EQFULL          = 106,
     }
 
-    impl_errno!(Errno);
-
     pub const ELAST: Errno       = Errno::EQFULL;
     pub const EWOULDBLOCK: Errno = Errno::EAGAIN;
     pub const EDEADLOCK:   Errno = Errno::EDEADLK;
@@ -1108,8 +1147,6 @@ mod consts {
 
     }
 
-    impl_errno!(Errno);
-
     pub const ELAST: Errno       = Errno::EOWNERDEAD;
     pub const EWOULDBLOCK: Errno = Errno::EAGAIN;
     pub const EDEADLOCK:   Errno = Errno::EDEADLK;
@@ -1330,8 +1367,6 @@ mod consts {
         EASYNC          = 99,
     }
 
-    impl_errno!(Errno);
-
     pub const ELAST: Errno       = Errno::EASYNC;
     pub const EWOULDBLOCK: Errno = Errno::EAGAIN;
     pub const EDEADLOCK:   Errno = Errno::EDEADLK;
@@ -1547,8 +1582,6 @@ mod consts {
         ENOTSUP         = 91,
     }
 
-    impl_errno!(Errno);
-
     pub const ELAST: Errno       = Errno::ENOTSUP;
     pub const EWOULDBLOCK: Errno = Errno::EAGAIN;
 
@@ -1650,6 +1683,220 @@ mod consts {
             89  => EIDRM,
             90  => ENOMSG,
             91  => ENOTSUP,
+            _   => UnknownErrno,
+        }
+    }
+}
+
+#[cfg(target_os = "netbsd")]
+mod consts {
+    #[derive(Copy, Debug, Clone, PartialEq)]
+    pub enum Errno {
+        UnknownErrno    = 0,
+        EPERM		= 1,
+        ENOENT		= 2,
+        ESRCH		= 3,
+        EINTR		= 4,
+        EIO		= 5,
+        ENXIO		= 6,
+        E2BIG		= 7,
+        ENOEXEC		= 8,
+        EBADF		= 9,
+        ECHILD		= 10,
+        EDEADLK		= 11,
+        ENOMEM		= 12,
+        EACCES		= 13,
+        EFAULT		= 14,
+        ENOTBLK		= 15,
+        EBUSY		= 16,
+        EEXIST		= 17,
+        EXDEV		= 18,
+        ENODEV		= 19,
+        ENOTDIR		= 20,
+        EISDIR		= 21,
+        EINVAL		= 22,
+        ENFILE		= 23,
+        EMFILE		= 24,
+        ENOTTY		= 25,
+        ETXTBSY		= 26,
+        EFBIG		= 27,
+        ENOSPC		= 28,
+        ESPIPE		= 29,
+        EROFS		= 30,
+        EMLINK		= 31,
+        EPIPE		= 32,
+        EDOM		= 33,
+        ERANGE		= 34,
+        EAGAIN		= 35,
+        EINPROGRESS	= 36,
+        EALREADY	= 37,
+        ENOTSOCK	= 38,
+        EDESTADDRREQ	= 39,
+        EMSGSIZE	= 40,
+        EPROTOTYPE	= 41,
+        ENOPROTOOPT	= 42,
+        EPROTONOSUPPORT	= 43,
+        ESOCKTNOSUPPORT	= 44,
+        EOPNOTSUPP	= 45,
+        EPFNOSUPPORT	= 46,
+        EAFNOSUPPORT	= 47,
+        EADDRINUSE	= 48,
+        EADDRNOTAVAIL	= 49,
+        ENETDOWN	= 50,
+        ENETUNREACH	= 51,
+        ENETRESET	= 52,
+        ECONNABORTED	= 53,
+        ECONNRESET	= 54,
+        ENOBUFS		= 55,
+        EISCONN		= 56,
+        ENOTCONN	= 57,
+        ESHUTDOWN	= 58,
+        ETOOMANYREFS	= 59,
+        ETIMEDOUT	= 60,
+        ECONNREFUSED	= 61,
+        ELOOP		= 62,
+        ENAMETOOLONG	= 63,
+        EHOSTDOWN	= 64,
+        EHOSTUNREACH	= 65,
+        ENOTEMPTY	= 66,
+        EPROCLIM	= 67,
+        EUSERS		= 68,
+        EDQUOT		= 69,
+        ESTALE		= 70,
+        EREMOTE		= 71,
+        EBADRPC		= 72,
+        ERPCMISMATCH	= 73,
+        EPROGUNAVAIL	= 74,
+        EPROGMISMATCH	= 75,
+        EPROCUNAVAIL	= 76,
+        ENOLCK		= 77,
+        ENOSYS		= 78,
+        EFTYPE		= 79,
+        EAUTH		= 80,
+        ENEEDAUTH	= 81,
+        EIDRM		= 82,
+        ENOMSG		= 83,
+        EOVERFLOW	= 84,
+        EILSEQ		= 85,
+        ENOTSUP		= 86,
+        ECANCELED	= 87,
+        EBADMSG		= 88,
+        ENODATA		= 89,
+        ENOSR		= 90,
+        ENOSTR		= 91,
+        ETIME		= 92,
+        ENOATTR		= 93,
+        EMULTIHOP	= 94,
+        ENOLINK		= 95,
+        EPROTO		= 96,
+    }
+
+    pub const ELAST: Errno       = Errno::ENOTSUP;
+    pub const EWOULDBLOCK: Errno = Errno::EAGAIN;
+
+    pub const EL2NSYNC: Errno = Errno::UnknownErrno;
+
+    pub fn from_i32(e: i32) -> Errno {
+        use self::Errno::*;
+
+        match e {
+            0   => UnknownErrno,
+            1	=> EPERM,
+            2	=> ENOENT,
+            3	=> ESRCH,
+            4	=> EINTR,
+            5	=> EIO,
+            6	=> ENXIO,
+            7	=> E2BIG,
+            8	=> ENOEXEC,
+            9	=> EBADF,
+            10	=> ECHILD,
+            11	=> EDEADLK,
+            12	=> ENOMEM,
+            13	=> EACCES,
+            14	=> EFAULT,
+            15	=> ENOTBLK,
+            16	=> EBUSY,
+            17	=> EEXIST,
+            18	=> EXDEV,
+            19	=> ENODEV,
+            20	=> ENOTDIR,
+            21	=> EISDIR,
+            22	=> EINVAL,
+            23	=> ENFILE,
+            24	=> EMFILE,
+            25	=> ENOTTY,
+            26	=> ETXTBSY,
+            27	=> EFBIG,
+            28	=> ENOSPC,
+            29	=> ESPIPE,
+            30	=> EROFS,
+            31	=> EMLINK,
+            32	=> EPIPE,
+            33	=> EDOM,
+            34	=> ERANGE,
+            35	=> EAGAIN,
+            36	=> EINPROGRESS,
+            37	=> EALREADY,
+            38	=> ENOTSOCK,
+            39	=> EDESTADDRREQ,
+            40	=> EMSGSIZE,
+            41	=> EPROTOTYPE,
+            42	=> ENOPROTOOPT,
+            43	=> EPROTONOSUPPORT,
+            44	=> ESOCKTNOSUPPORT,
+            45	=> EOPNOTSUPP,
+            46	=> EPFNOSUPPORT,
+            47	=> EAFNOSUPPORT,
+            48	=> EADDRINUSE,
+            49	=> EADDRNOTAVAIL,
+            50	=> ENETDOWN,
+            51	=> ENETUNREACH,
+            52	=> ENETRESET,
+            53	=> ECONNABORTED,
+            54	=> ECONNRESET,
+            55	=> ENOBUFS,
+            56	=> EISCONN,
+            57	=> ENOTCONN,
+            58	=> ESHUTDOWN,
+            59	=> ETOOMANYREFS,
+            60	=> ETIMEDOUT,
+            61	=> ECONNREFUSED,
+            62	=> ELOOP,
+            63	=> ENAMETOOLONG,
+            64	=> EHOSTDOWN,
+            65	=> EHOSTUNREACH,
+            66	=> ENOTEMPTY,
+            67	=> EPROCLIM,
+            68	=> EUSERS,
+            69	=> EDQUOT,
+            70	=> ESTALE,
+            71	=> EREMOTE,
+            72	=> EBADRPC,
+            73	=> ERPCMISMATCH,
+            74	=> EPROGUNAVAIL,
+            75	=> EPROGMISMATCH,
+            76	=> EPROCUNAVAIL,
+            77	=> ENOLCK,
+            78	=> ENOSYS,
+            79	=> EFTYPE,
+            80	=> EAUTH,
+            81	=> ENEEDAUTH,
+            82	=> EIDRM,
+            83	=> ENOMSG,
+            84	=> EOVERFLOW,
+            85	=> EILSEQ,
+            86	=> ENOTSUP,
+            87	=> ECANCELED,
+            88	=> EBADMSG,
+            89	=> ENODATA,
+            90	=> ENOSR,
+            91	=> ENOSTR,
+            92	=> ETIME,
+            93	=> ENOATTR,
+            94	=> EMULTIHOP,
+            95	=> ENOLINK,
+            96	=> EPROTO,
             _   => UnknownErrno,
         }
     }

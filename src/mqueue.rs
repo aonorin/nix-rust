@@ -1,13 +1,13 @@
-//! Posis Message Queue functions
+//! Posix Message Queue functions
 //!
 //! [Further reading and details on the C API](http://man7.org/linux/man-pages/man7/mq_overview.7.html)
 
-use {Error, Result, from_ffi};
-use errno::Errno;
+use {Errno, Result};
 
-use libc::{c_int, c_long, c_char, size_t, mode_t, strlen};
+use libc::{c_int, c_long, c_char, size_t, mode_t};
 use std::ffi::CString;
 use sys::stat::Mode;
+use std::ptr;
 
 pub use self::consts::*;
 
@@ -41,6 +41,7 @@ mod ffi {
     use super::MQd;
     use super::MqAttr;
 
+    #[allow(improper_ctypes)]
     extern "C" {
         pub fn mq_open(name: *const c_char, oflag: c_int, ...) -> MQd;
 
@@ -75,25 +76,21 @@ impl MqAttr {
 }
 
 
-#[inline]
-pub fn mq_open(name: &CString, oflag: MQ_OFlag, mode: Mode, attr: &MqAttr) -> Result<MQd> {
-    let res = unsafe { ffi::mq_open(name.as_ptr(), oflag.bits(), mode.bits() as mode_t, attr as *const MqAttr) };
+pub fn mq_open(name: &CString, oflag: MQ_OFlag, mode: Mode, attr: Option<&MqAttr>) -> Result<MQd> {
+    let attr_p = attr.map(|attr| attr as *const MqAttr).unwrap_or(ptr::null());
+    let res = unsafe { ffi::mq_open(name.as_ptr(), oflag.bits(), mode.bits() as mode_t, attr_p) };
 
-    if res < 0 {
-        return Err(Error::Sys(Errno::last()));
-    }
-
-    Ok(res)
+    Errno::result(res)
 }
 
 pub fn mq_unlink(name: &CString) -> Result<()> {
     let res = unsafe { ffi::mq_unlink(name.as_ptr()) };
-    from_ffi(res)
+    Errno::result(res).map(drop)
 }
 
 pub fn mq_close(mqdes: MQd) -> Result<()>  {
     let res = unsafe { ffi::mq_close(mqdes) };
-    from_ffi(res)
+    Errno::result(res).map(drop)
 }
 
 
@@ -101,30 +98,19 @@ pub fn mq_receive(mqdes: MQd, message: &mut [u8], msq_prio: u32) -> Result<usize
     let len = message.len() as size_t;
     let res = unsafe { ffi::mq_receive(mqdes, message.as_mut_ptr() as *mut c_char, len, &msq_prio) };
 
-    if res < 0 {
-        return Err(Error::Sys(Errno::last()));
-    }
-
-    Ok(res as usize)
+    Errno::result(res).map(|r| r as usize)
 }
 
-pub fn mq_send(mqdes: MQd, message: &CString, msq_prio: u32) -> Result<usize> {
-    let len = unsafe { strlen(message.as_ptr()) as size_t };
-    let res = unsafe { ffi::mq_send(mqdes, message.as_ptr(), len, msq_prio) };
+pub fn mq_send(mqdes: MQd, message: &[u8], msq_prio: u32) -> Result<()> {
+    let res = unsafe { ffi::mq_send(mqdes, message.as_ptr() as *const c_char, message.len(), msq_prio) };
 
-    if res < 0 {
-        return Err(Error::Sys(Errno::last()));
-    }
-
-    Ok(res as usize)
+    Errno::result(res).map(drop)
 }
 
 pub fn mq_getattr(mqd: MQd) -> Result<MqAttr> {
     let mut attr = MqAttr::new(0, 0, 0, 0);
     let res = unsafe { ffi::mq_getattr(mqd, &mut attr) };
-    if res < 0 {
-        return Err(Error::Sys(Errno::last()));
-    }
+    try!(Errno::result(res));
     Ok(attr)
 }
 
@@ -136,9 +122,7 @@ pub fn mq_getattr(mqd: MQd) -> Result<MqAttr> {
 pub fn mq_setattr(mqd: MQd, newattr: &MqAttr) -> Result<MqAttr> {
     let mut attr = MqAttr::new(0, 0, 0, 0);
     let res = unsafe { ffi::mq_setattr(mqd, newattr as *const MqAttr, &mut attr) };
-    if res < 0 {
-        return Err(Error::Sys(Errno::last()));
-    }
+    try!(Errno::result(res));
     Ok(attr)
 }
 
